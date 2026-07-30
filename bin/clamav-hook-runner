@@ -1,0 +1,795 @@
+#!/bin/bash
+set -u
+umask 077
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin
+
+USER_HOME="${CLAMAV_HOOK_HOME:-${HOME:-}}"
+BASE="${CLAMAV_HOOK_BASE:-${USER_HOME}/Library/Application Support/ClamAV-Hook}"
+STATE_DIR="${CLAMAV_HOOK_STATE_DIR:-${BASE}/state}"
+LOG_DIR="${CLAMAV_HOOK_LOG_DIR:-${USER_HOME}/Library/Logs/ClamAV-Hook}"
+DB_DIR="${CLAMAV_HOOK_DB_DIR:-${BASE}/db}"
+WEBHOOK_FILE="${BASE}/discord-webhook.url"
+SETTINGS_FILE="${BASE}/settings.conf"
+QUICK_PATHS_FILE="${BASE}/quick-paths"
+FULL_PATHS_FILE="${BASE}/full-paths"
+FULL_EXCLUDES_FILE="${BASE}/full-excludes"
+FRESHCLAM_CONFIG="${BASE}/freshclam.conf"
+LOCK_DIR="${STATE_DIR}/run.lock"
+
+FRESHCLAM="${CLAMAV_HOOK_FRESHCLAM:-$(command -v freshclam 2>/dev/null || true)}"
+CLAMSCAN="${CLAMAV_HOOK_CLAMSCAN:-$(command -v clamscan 2>/dev/null || true)}"
+JQ="${CLAMAV_HOOK_JQ:-$(command -v jq 2>/dev/null || true)}"
+CURL="${CLAMAV_HOOK_CURL:-/usr/bin/curl}"
+NICE="${CLAMAV_HOOK_NICE:-/usr/bin/nice}"
+TASKPOLICY="${CLAMAV_HOOK_TASKPOLICY:-/usr/sbin/taskpolicy}"
+PS="${CLAMAV_HOOK_PS:-/bin/ps}"
+
+DEFAULT_UPDATE_INTERVAL=86400
+DEFAULT_QUICK_INTERVAL=259200
+DEFAULT_FULL_INTERVAL=1814400
+DEFAULT_LOG_RETENTION_DAYS=90
+child_pid=""
+payload_file_active=""
+
+timestamp() {
+  date '+%Y-%m-%d %H:%M:%S %z'
+}
+
+epoch_now() {
+  date '+%s'
+}
+
+refuse_root() {
+  if [ "$(id -u)" -eq 0 ]; then
+    printf 'ClamAV-Hook refuses to run scans or Homebrew tools as root.\n' >&2
+    exit 77
+  fi
+}
+
+validate_home() {
+  case "${USER_HOME}" in
+    /Users/*) ;;
+    *)
+      printf 'ClamAV-Hook requires an absolute home directory under /Users.\n' >&2
+      exit 67
+      ;;
+  esac
+}
+
+validate_identity() {
+  local expected="${CLAMAV_HOOK_UID:-}"
+  if [ -z "${expected}" ]; then
+    return
+  fi
+  case "${expected}" in
+    *[!0-9]*)
+      printf 'Invalid expected UID configuration.\n' >&2
+      exit 67
+      ;;
+  esac
+  if [ "$(id -u)" -ne "${expected}" ]; then
+    printf 'ClamAV-Hook is configured for UID %s, not UID %s.\n' \
+      "${expected}" "$(id -u)" >&2
+    exit 77
+  fi
+}
+
+require_tools() {
+  local missing=0
+  local item
+  for item in "${FRESHCLAM}" "${CLAMSCAN}" "${JQ}" "${CURL}" "${PS}"; do
+    if [ -z "${item}" ] || [ ! -x "${item}" ]; then
+      missing=1
+    fi
+  done
+  if [ "${missing}" -ne 0 ]; then
+    printf 'Required tools are missing. Install ClamAV and jq, then reinstall ClamAV-Hook.\n' >&2
+    exit 69
+  fi
+}
+
+prepare_runtime_dirs() {
+  mkdir -p "${BASE}" "${STATE_DIR}" "${LOG_DIR}" "${DB_DIR}"
+  chmod 700 "${BASE}" "${STATE_DIR}" "${LOG_DIR}" "${DB_DIR}"
+}
+
+cleanup_old_logs() {
+  local retention
+  retention="$(read_interval LOG_RETENTION_DAYS "${DEFAULT_LOG_RETENTION_DAYS}")"
+  find "${LOG_DIR}" -type f -name '*.log' -mtime "+${retention}" -delete 2>/dev/null || true
+}
+
+initialize_config() {
+  local current_user escaped_home
+  current_user="$(id -un)"
+  escaped_home="$(printf '%s\n' "${USER_HOME}" | sed 's/[][(){}.^$*+?|\\]/\\&/g')"
+
+  if [ ! -f "${SETTINGS_FILE}" ]; then
+    cat > "${SETTINGS_FILE}" <<EOF
+UPDATE_INTERVAL_SECONDS=${DEFAULT_UPDATE_INTERVAL}
+QUICK_INTERVAL_SECONDS=${DEFAULT_QUICK_INTERVAL}
+FULL_INTERVAL_SECONDS=${DEFAULT_FULL_INTERVAL}
+LOG_RETENTION_DAYS=${DEFAULT_LOG_RETENTION_DAYS}
+EOF
+  fi
+
+  if [ ! -f "${QUICK_PATHS_FILE}" ]; then
+    printf '%s\n' "${USER_HOME}/Downloads" > "${QUICK_PATHS_FILE}"
+  fi
+
+  if [ ! -f "${FULL_PATHS_FILE}" ]; then
+    printf '%s\n' "${USER_HOME}" "/Applications" > "${FULL_PATHS_FILE}"
+  fi
+
+  if [ ! -f "${FULL_EXCLUDES_FILE}" ]; then
+    cat > "${FULL_EXCLUDES_FILE}" <<EOF
+^${escaped_home}/Library/Caches(\$|/)
+^${escaped_home}/Library/CloudStorage(\$|/)
+^${escaped_home}/Library/Developer(\$|/)
+^${escaped_home}/Library/Containers/com\\.docker\\.docker(\$|/)
+^${escaped_home}/Library/Application Support/OrbStack(\$|/)
+^${escaped_home}/\\.orbstack(\$|/)
+EOF
+  fi
+
+  if [ ! -f "${FRESHCLAM_CONFIG}" ]; then
+    cat > "${FRESHCLAM_CONFIG}" <<EOF
+DatabaseDirectory ${DB_DIR}
+DatabaseOwner ${current_user}
+DatabaseMirror database.clamav.net
+DNSDatabaseInfo current.cvd.clamav.net
+LogTime yes
+EOF
+  fi
+
+  touch "${WEBHOOK_FILE}"
+  if [ ! -f "${STATE_DIR}/installed-at" ]; then
+    epoch_now > "${STATE_DIR}/installed-at"
+  fi
+
+  chmod 600 \
+    "${SETTINGS_FILE}" \
+    "${QUICK_PATHS_FILE}" \
+    "${FULL_PATHS_FILE}" \
+    "${FULL_EXCLUDES_FILE}" \
+    "${FRESHCLAM_CONFIG}" \
+    "${WEBHOOK_FILE}" \
+    "${STATE_DIR}/installed-at"
+  printf 'Initialized ClamAV-Hook data for %s at %s\n' "${current_user}" "${BASE}"
+}
+
+read_interval() {
+  local key="$1"
+  local fallback="$2"
+  local value
+
+  value="$(
+    awk -F= -v wanted="${key}" '
+      $1 == wanted {
+        sub(/^[^=]*=/, "")
+        print
+        exit
+      }
+    ' "${SETTINGS_FILE}" 2>/dev/null
+  )"
+
+  case "${value}" in
+    ''|*[!0-9]*)
+      printf '%s\n' "${fallback}"
+      ;;
+    *)
+      printf '%s\n' "${value}"
+      ;;
+  esac
+}
+
+read_epoch_file() {
+  local state_file="$1"
+  local value now
+  if [ ! -f "${state_file}" ]; then
+    printf '0\n'
+    return
+  fi
+
+  value="$(cat "${state_file}" 2>/dev/null || true)"
+  case "${value}" in
+    ''|*[!0-9]*)
+      printf '0\n'
+      return
+      ;;
+  esac
+
+  now="$(epoch_now)"
+  if [ "${value}" -gt $((now + 300)) ]; then
+    printf '0\n'
+  else
+    printf '%s\n' "${value}"
+  fi
+}
+
+last_success() {
+  read_epoch_file "${STATE_DIR}/$1.last-success"
+}
+
+last_reference() {
+  local success
+  success="$(last_success "$1")"
+  if [ "${success}" -gt 0 ]; then
+    printf '%s\n' "${success}"
+  elif [ -f "${STATE_DIR}/installed-at" ]; then
+    read_epoch_file "${STATE_DIR}/installed-at"
+  else
+    printf '0\n'
+  fi
+}
+
+mark_success() {
+  epoch_now > "${STATE_DIR}/$1.last-success"
+  chmod 600 "${STATE_DIR}/$1.last-success"
+}
+
+is_due() {
+  local task="$1"
+  local interval="$2"
+  local now last
+  now="$(epoch_now)"
+  last="$(last_reference "${task}")"
+  [ $((now - last)) -ge "${interval}" ]
+}
+
+format_epoch() {
+  local value="$1"
+  if [ "${value}" -eq 0 ]; then
+    printf 'never'
+  else
+    date -r "${value}" '+%Y-%m-%d %H:%M:%S %z' 2>/dev/null || printf '%s' "${value}"
+  fi
+}
+
+process_uid_token() {
+  local pid="$1"
+  LC_ALL=C "${PS}" -p "${pid}" -o uid= 2>/dev/null |
+    /usr/bin/tr -d '[:space:]'
+}
+
+process_start_token() {
+  local pid="$1"
+  LC_ALL=C "${PS}" -p "${pid}" -o lstart= 2>/dev/null |
+    /usr/bin/awk '{$1=$1; print; exit}'
+}
+
+process_command_token() {
+  local pid="$1"
+  LC_ALL=C "${PS}" -ww -p "${pid}" -o command= 2>/dev/null |
+    /usr/bin/awk '{$1=$1; print; exit}'
+}
+
+write_lock_metadata() {
+  local current_uid current_start current_command
+  current_uid="$(id -u)"
+  current_start="$(process_start_token "$$")"
+  current_command="$(process_command_token "$$")"
+
+  if [ -z "${current_start}" ] || [ -z "${current_command}" ]; then
+    return 1
+  fi
+
+  printf '%s\n' "$$" > "${LOCK_DIR}/pid" &&
+    printf '%s\n' "${current_uid}" > "${LOCK_DIR}/uid" &&
+    printf '%s\n' "${current_start}" > "${LOCK_DIR}/start" &&
+    printf '%s\n' "${current_command}" > "${LOCK_DIR}/command" &&
+    chmod 600 \
+      "${LOCK_DIR}/pid" \
+      "${LOCK_DIR}/uid" \
+      "${LOCK_DIR}/start" \
+      "${LOCK_DIR}/command"
+}
+
+acquire_lock() {
+  local lock_pid lock_uid lock_start lock_command
+  local actual_uid actual_start actual_command
+  if mkdir "${LOCK_DIR}" 2>/dev/null; then
+    if write_lock_metadata; then
+      return 0
+    fi
+    rm -f \
+      "${LOCK_DIR}/pid" \
+      "${LOCK_DIR}/uid" \
+      "${LOCK_DIR}/start" \
+      "${LOCK_DIR}/command"
+    rmdir "${LOCK_DIR}" 2>/dev/null || true
+    return 1
+  fi
+
+  if [ -L "${LOCK_DIR}" ] || [ ! -d "${LOCK_DIR}" ]; then
+    return 1
+  fi
+
+  lock_pid="$(cat "${LOCK_DIR}/pid" 2>/dev/null || true)"
+  lock_uid="$(cat "${LOCK_DIR}/uid" 2>/dev/null || true)"
+  lock_start="$(cat "${LOCK_DIR}/start" 2>/dev/null || true)"
+  lock_command="$(cat "${LOCK_DIR}/command" 2>/dev/null || true)"
+  case "${lock_pid}:${lock_uid}" in
+    *[!0-9:]*|:|*:) ;;
+    *)
+      if kill -0 "${lock_pid}" 2>/dev/null; then
+        actual_uid="$(process_uid_token "${lock_pid}")"
+        actual_start="$(process_start_token "${lock_pid}")"
+        actual_command="$(process_command_token "${lock_pid}")"
+        if [ "${lock_uid}" = "$(id -u)" ] &&
+           [ "${actual_uid}" = "${lock_uid}" ] &&
+           [ -n "${lock_start}" ] &&
+           [ "${actual_start}" = "${lock_start}" ] &&
+           [ -n "${lock_command}" ] &&
+           [ "${actual_command}" = "${lock_command}" ]; then
+          return 1
+        fi
+      fi
+      ;;
+  esac
+
+  rm -f \
+    "${LOCK_DIR}/pid" \
+    "${LOCK_DIR}/uid" \
+    "${LOCK_DIR}/start" \
+    "${LOCK_DIR}/command"
+  rmdir "${LOCK_DIR}" 2>/dev/null || return 1
+  mkdir "${LOCK_DIR}" || return 1
+  if ! write_lock_metadata; then
+    rm -f \
+      "${LOCK_DIR}/pid" \
+      "${LOCK_DIR}/uid" \
+      "${LOCK_DIR}/start" \
+      "${LOCK_DIR}/command"
+    rmdir "${LOCK_DIR}" 2>/dev/null || true
+    return 1
+  fi
+}
+
+cleanup_lock() {
+  local lock_pid
+  if [ -n "${payload_file_active}" ]; then
+    case "${payload_file_active}" in
+      "${STATE_DIR}"/discord-payload.*)
+        rm -f "${payload_file_active}"
+        ;;
+    esac
+    payload_file_active=""
+  fi
+  lock_pid="$(cat "${LOCK_DIR}/pid" 2>/dev/null || true)"
+  if [ "${lock_pid}" = "$$" ]; then
+    rm -f \
+      "${LOCK_DIR}/pid" \
+      "${LOCK_DIR}/uid" \
+      "${LOCK_DIR}/start" \
+      "${LOCK_DIR}/command"
+    rmdir "${LOCK_DIR}" 2>/dev/null || true
+  fi
+}
+
+handle_signal() {
+  local exit_code="$1"
+  if [ -n "${child_pid}" ]; then
+    kill -TERM "${child_pid}" 2>/dev/null || true
+    wait "${child_pid}" 2>/dev/null || true
+    child_pid=""
+  fi
+  exit "${exit_code}"
+}
+
+notify_discord() {
+  local message="$1"
+  local webhook payload_file rc
+
+  if [ ! -s "${WEBHOOK_FILE}" ]; then
+    return 0
+  fi
+
+  webhook="$(tr -d '\r\n' < "${WEBHOOK_FILE}")"
+  if ! printf '%s\n' "${webhook}" |
+    grep -Eq '^https://(discord\.com|discordapp\.com)/api/webhooks/[0-9]+/[A-Za-z0-9._-]+$'; then
+    printf '%s Invalid Discord webhook URL in %s\n' "$(timestamp)" "${WEBHOOK_FILE}" >&2
+    return 1
+  fi
+
+  payload_file="$(mktemp "${STATE_DIR}/discord-payload.XXXXXX")" || return 1
+  payload_file_active="${payload_file}"
+  chmod 600 "${payload_file}"
+  message="$(
+    printf '%s' "${message}" |
+      LC_ALL=C tr -d '\000-\010\013\014\016-\037\177' |
+      head -c 1800
+  )"
+
+  # shellcheck disable=SC2016
+  if ! "${JQ}" -n \
+    --arg content "${message}" \
+    '{content: $content, allowed_mentions: {parse: []}}' > "${payload_file}"; then
+    rm -f "${payload_file}"
+    payload_file_active=""
+    return 1
+  fi
+
+  # Keep the secret URL out of process arguments.
+  printf 'url = "%s"\n' "${webhook}" |
+    "${CURL}" --disable --config - --fail --silent --show-error \
+      --proto '=https' \
+      --connect-timeout 15 \
+      --max-time 30 \
+      -H 'Content-Type: application/json' \
+      --data-binary "@${payload_file}" >/dev/null
+  rc=$?
+
+  rm -f "${payload_file}"
+  payload_file_active=""
+  return "${rc}"
+}
+
+summary_from_log() {
+  local log_file="$1"
+  local summary
+  summary="$(
+    awk '
+      /^----------- SCAN SUMMARY -----------$/ { capture=1 }
+      capture { print }
+    ' "${log_file}" | tail -n 16
+  )"
+  if [ -n "${summary}" ]; then
+    printf '%s\n' "${summary}"
+  else
+    tail -n 12 "${log_file}"
+  fi
+}
+
+run_update() {
+  local log_file rc
+  log_file="${LOG_DIR}/freshclam-$(date '+%Y%m%d-%H%M%S')-$$.log"
+  printf '%s Starting ClamAV database update\n' "$(timestamp)" | tee -a "${log_file}"
+
+  if [ ! -r "${FRESHCLAM_CONFIG}" ]; then
+    printf '%s Missing freshclam configuration: %s\n' "$(timestamp)" "${FRESHCLAM_CONFIG}" |
+      tee -a "${log_file}" >&2
+    return 66
+  fi
+
+  "${FRESHCLAM}" \
+    --config-file="${FRESHCLAM_CONFIG}" \
+    --datadir="${DB_DIR}" \
+    --stdout >>"${log_file}" 2>&1 &
+  child_pid=$!
+  wait "${child_pid}"
+  rc=$?
+  child_pid=""
+
+  if [ "${rc}" -eq 0 ]; then
+    mark_success update
+    printf '%s Database update completed\n' "$(timestamp)" | tee -a "${log_file}"
+  else
+    printf '%s Database update failed (exit %d)\n' "$(timestamp)" "${rc}" |
+      tee -a "${log_file}" >&2
+    notify_discord "⚠️ ClamAV database update failed (exit ${rc}). Local log: ${log_file}" || true
+  fi
+  return "${rc}"
+}
+
+run_scan() {
+  local mode="$1"
+  local paths_file log_file line rc summary target_count
+  local total_errors access_errors coverage_errors detected coverage_incomplete
+  local -a scan_args
+
+  if [ "${mode}" = "quick" ]; then
+    paths_file="${QUICK_PATHS_FILE}"
+  else
+    paths_file="${FULL_PATHS_FILE}"
+  fi
+
+  if [ ! -r "${paths_file}" ]; then
+    printf 'Missing scan path configuration: %s\n' "${paths_file}" >&2
+    return 66
+  fi
+
+  log_file="${LOG_DIR}/${mode}-$(date '+%Y%m%d-%H%M%S')-$$.log"
+  scan_args=(
+    "--database=${DB_DIR}"
+    "--official-db-only=yes"
+    "--bytecode-unsigned=no"
+    "--fail-if-cvd-older-than=2"
+    "--alert-exceeds-max=yes"
+    "--recursive=yes"
+    "--infected"
+    "--cross-fs=no"
+    "--follow-dir-symlinks=0"
+    "--follow-file-symlinks=0"
+    "--max-filesize=1G"
+    "--max-scansize=2G"
+  )
+
+  if [ "${mode}" = "full" ] && [ -r "${FULL_EXCLUDES_FILE}" ]; then
+    while IFS= read -r line || [ -n "${line}" ]; do
+      case "${line}" in
+        ''|\#*) continue ;;
+      esac
+      scan_args+=("--exclude-dir=${line}")
+    done < "${FULL_EXCLUDES_FILE}"
+  fi
+
+  target_count=0
+  while IFS= read -r line || [ -n "${line}" ]; do
+    case "${line}" in
+      ''|\#*) continue ;;
+      /*) ;;
+      *)
+        printf '%s Ignoring non-absolute scan path: %s\n' "$(timestamp)" "${line}" |
+          tee -a "${log_file}" >&2
+        continue
+        ;;
+    esac
+
+    if [ ! -e "${line}" ]; then
+      printf '%s Skipping missing scan path: %s\n' "$(timestamp)" "${line}" |
+        tee -a "${log_file}" >&2
+      continue
+    fi
+    scan_args+=("${line}")
+    target_count=$((target_count + 1))
+  done < "${paths_file}"
+
+  if [ "${target_count}" -eq 0 ]; then
+    printf '%s No valid scan targets configured for %s scan\n' "$(timestamp)" "${mode}" |
+      tee -a "${log_file}" >&2
+    notify_discord "⚠️ ClamAV ${mode} scan did not run: no valid targets." || true
+    return 66
+  fi
+
+  printf '%s Starting %s scan\n' "$(timestamp)" "${mode}" | tee -a "${log_file}"
+
+  if [ -x "${TASKPOLICY}" ]; then
+    "${NICE}" -n 15 "${TASKPOLICY}" -b "${CLAMSCAN}" "${scan_args[@]}" >>"${log_file}" 2>&1 &
+  else
+    "${NICE}" -n 15 "${CLAMSCAN}" "${scan_args[@]}" >>"${log_file}" 2>&1 &
+  fi
+  child_pid=$!
+  wait "${child_pid}"
+  rc=$?
+  child_pid=""
+  detected=0
+  coverage_incomplete=0
+  if [ "${rc}" -eq 1 ]; then
+    detected=1
+  fi
+  total_errors="$(
+    awk -F: '
+      /^Total errors:[[:space:]]*[0-9]+[[:space:]]*$/ {
+        value=$2
+        gsub(/[[:space:]]/, "", value)
+      }
+      END {
+        if (value ~ /^[0-9]+$/) {
+          print value
+        } else {
+          print 0
+        }
+      }
+    ' "${log_file}" 2>/dev/null
+  )"
+  access_errors="$(
+    grep -Eic 'operation not permitted|permission denied|access denied' "${log_file}" 2>/dev/null || true
+  )"
+  coverage_errors="${total_errors}"
+  if [ "${access_errors}" -gt "${coverage_errors}" ]; then
+    coverage_errors="${access_errors}"
+  fi
+  if [ "${coverage_errors}" -gt 0 ]; then
+    coverage_incomplete=1
+  fi
+  if [ "${coverage_incomplete}" -eq 1 ] &&
+     { [ "${rc}" -eq 0 ] || [ "${rc}" -eq 1 ]; }; then
+    rc=2
+    printf '%s Scan coverage was incomplete (%s scan error(s))\n' \
+      "$(timestamp)" "${coverage_errors}" | tee -a "${log_file}" >&2
+  fi
+  summary="$(summary_from_log "${log_file}")"
+
+  if [ "${detected}" -eq 1 ] && [ "${coverage_incomplete}" -eq 1 ]; then
+    notify_discord "🚨 ClamAV ${mode} scan detected malware, but scan coverage was incomplete (${coverage_errors} errors).
+\`\`\`
+${summary}
+\`\`\`
+No success timestamp was recorded. Review the private local log: ${log_file}" || true
+    printf '%s %s scan finished with detections and incomplete coverage (exit %d)\n' \
+      "$(timestamp)" "${mode}" "${rc}" | tee -a "${log_file}"
+    return "${rc}"
+  fi
+
+  case "${rc}" in
+    0)
+      mark_success "${mode}"
+      if [ "${mode}" = "full" ]; then
+        mark_success quick
+      fi
+      notify_discord "✅ ClamAV ${mode} scan completed cleanly.
+\`\`\`
+${summary}
+\`\`\`" || true
+      ;;
+    1)
+      mark_success "${mode}"
+      if [ "${mode}" = "full" ]; then
+        mark_success quick
+      fi
+      notify_discord "🚨 ClamAV ${mode} scan detected malware.
+\`\`\`
+${summary}
+\`\`\`
+Review the private local log: ${log_file}" || true
+      ;;
+    *)
+      notify_discord "⚠️ ClamAV ${mode} scan failed (exit ${rc}).
+\`\`\`
+${summary}
+\`\`\`
+Review the private local log: ${log_file}" || true
+      ;;
+  esac
+
+  printf '%s %s scan finished (exit %d)\n' "$(timestamp)" "${mode}" "${rc}" |
+    tee -a "${log_file}"
+  return "${rc}"
+}
+
+show_status() {
+  local update quick full
+  update="$(last_success update)"
+  quick="$(last_success quick)"
+  full="$(last_success full)"
+
+  printf 'ClamAV-Hook status\n'
+  printf '  Engine and private DB: %s\n' \
+    "$("${CLAMSCAN}" --database="${DB_DIR}" --version 2>/dev/null || printf 'unavailable')"
+  printf '  Private database: %s\n' "${DB_DIR}"
+  printf '  Update last success: %s\n' "$(format_epoch "${update}")"
+  printf '  Quick last success:  %s\n' "$(format_epoch "${quick}")"
+  printf '  Full last success:   %s\n' "$(format_epoch "${full}")"
+  if [ -s "${WEBHOOK_FILE}" ]; then
+    printf '  Discord webhook: configured\n'
+  else
+    printf '  Discord webhook: NOT configured\n'
+  fi
+}
+
+run_doctor() {
+  local failures=0
+  local paths_file line mode
+
+  printf 'ClamAV-Hook doctor\n'
+  printf '  Runtime user: %s (uid %s)\n' "$(id -un)" "$(id -u)"
+
+  if [ -r "${FRESHCLAM_CONFIG}" ] && [ -w "${DB_DIR}" ]; then
+    printf '  Private database directory: ready\n'
+  else
+    printf '  Private database directory: NOT ready\n' >&2
+    failures=$((failures + 1))
+  fi
+
+  if find "${DB_DIR}" -maxdepth 1 -type f \( -name '*.cvd' -o -name '*.cld' \) |
+    grep -q .; then
+    printf '  Signature files: present\n'
+  else
+    printf '  Signature files: missing; run clamav-hook update\n' >&2
+    failures=$((failures + 1))
+  fi
+
+  for mode in quick full; do
+    if [ "${mode}" = "quick" ]; then
+      paths_file="${QUICK_PATHS_FILE}"
+    else
+      paths_file="${FULL_PATHS_FILE}"
+    fi
+    while IFS= read -r line || [ -n "${line}" ]; do
+      case "${line}" in
+        ''|\#*) continue ;;
+      esac
+      if [ -d "${line}" ] && /bin/ls -A "${line}" >/dev/null 2>&1; then
+        printf '  %s path readable: %s\n' "${mode}" "${line}"
+      else
+        printf '  %s path NOT readable: %s\n' "${mode}" "${line}" >&2
+        failures=$((failures + 1))
+      fi
+    done < "${paths_file}"
+  done
+
+  if [ -s "${WEBHOOK_FILE}" ]; then
+    printf '  Discord webhook: configured\n'
+  else
+    printf '  Discord webhook: not configured\n'
+  fi
+  printf '  Coverage note: target checks are top-level only; TCC-protected descendants\n'
+  printf '                 must be verified from completed scan logs.\n'
+
+  if [ "${failures}" -gt 0 ]; then
+    printf 'Doctor found %s problem(s).\n' "${failures}" >&2
+    return 1
+  fi
+  printf 'Doctor found no blocking setup problems; scan coverage is not guaranteed.\n'
+}
+
+run_scheduled() {
+  local update_interval quick_interval full_interval
+  update_interval="$(read_interval UPDATE_INTERVAL_SECONDS "${DEFAULT_UPDATE_INTERVAL}")"
+  quick_interval="$(read_interval QUICK_INTERVAL_SECONDS "${DEFAULT_QUICK_INTERVAL}")"
+  full_interval="$(read_interval FULL_INTERVAL_SECONDS "${DEFAULT_FULL_INTERVAL}")"
+
+  if is_due update "${update_interval}"; then
+    run_update || true
+  fi
+
+  if is_due full "${full_interval}"; then
+    run_scan full || true
+  elif is_due quick "${quick_interval}"; then
+    run_scan quick || true
+  fi
+}
+
+command_name="${1:-scheduled}"
+refuse_root
+validate_home
+validate_identity
+require_tools
+prepare_runtime_dirs
+cleanup_old_logs
+
+case "${command_name}" in
+  init)
+    initialize_config
+    exit 0
+    ;;
+  status)
+    show_status
+    exit 0
+    ;;
+  doctor)
+    run_doctor
+    exit $?
+    ;;
+esac
+
+if ! acquire_lock; then
+  printf '%s Another ClamAV-Hook task is already running.\n' "$(timestamp)" >&2
+  exit 75
+fi
+trap cleanup_lock EXIT
+trap 'handle_signal 130' INT
+trap 'handle_signal 143' TERM
+
+case "${command_name}" in
+  scheduled)
+    run_scheduled
+    ;;
+  update)
+    run_update
+    ;;
+  quick)
+    run_scan quick
+    ;;
+  full)
+    run_scan full
+    ;;
+  notify-test)
+    if [ ! -s "${WEBHOOK_FILE}" ]; then
+      printf 'Discord webhook is not configured.\n' >&2
+      exit 78
+    fi
+    if notify_discord "✅ ClamAV-Hook notification test succeeded."; then
+      printf 'Discord notification test sent successfully.\n'
+    else
+      printf 'Discord notification test failed.\n' >&2
+      exit 69
+    fi
+    ;;
+  *)
+    printf 'Usage: %s {init|scheduled|update|quick|full|status|notify-test|doctor}\n' "$0" >&2
+    exit 64
+    ;;
+esac

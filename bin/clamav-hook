@@ -1,0 +1,42 @@
+#!/bin/bash
+set -eu
+
+RUNNER="/Library/Application Support/ClamAV-Hook/libexec/clamav-hook"
+WEBHOOK_HELPER="/Library/Application Support/ClamAV-Hook/libexec/clamav-hook-configure-webhook"
+VERSION="0.1.0-alpha.1"
+
+usage() {
+  cat <<'EOF'
+Usage: clamav-hook <command>
+
+Commands:
+  status              Show database, scan, and webhook status
+  update              Update the ClamAV signature database now
+  quick               Run the configured quick scan now
+  full                Run the configured full scan now
+  configure-webhook   Store a Discord webhook with user-only permissions
+  notify-test         Send one Discord test notification
+  doctor              Check dependencies, private data, and scan-path access
+  version             Show the installed ClamAV-Hook version
+  help                Show this help
+EOF
+}
+
+case "${1:-help}" in
+  configure-webhook)
+    exec "${WEBHOOK_HELPER}"
+    ;;
+  status|update|quick|full|notify-test|doctor)
+    exec "${RUNNER}" "$1"
+    ;;
+  version|--version)
+    printf 'ClamAV-Hook %s\n' "${VERSION}"
+    ;;
+  help|-h|--help)
+    usage
+    ;;
+  *)
+    usage >&2
+    exit 64
+    ;;
+esac

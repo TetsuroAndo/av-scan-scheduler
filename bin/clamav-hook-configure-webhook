@@ -1,0 +1,32 @@
+#!/bin/bash
+set -eu
+umask 077
+
+BASE="${CLAMAV_HOOK_BASE:-${HOME}/Library/Application Support/ClamAV-Hook}"
+DEST="${BASE}/discord-webhook.url"
+
+if [ "$(id -u)" -eq 0 ]; then
+  printf 'Webhook configuration must run as the target user, not root.\n' >&2
+  exit 77
+fi
+
+mkdir -p "${BASE}"
+chmod 700 "${BASE}"
+
+printf 'Discord Webhook URL (input hidden): '
+IFS= read -r -s webhook
+printf '\n'
+
+if ! printf '%s\n' "${webhook}" |
+  grep -Eq '^https://(discord\.com|discordapp\.com)/api/webhooks/[0-9]+/[A-Za-z0-9._-]+$'; then
+  unset webhook
+  printf 'Invalid Discord Webhook URL.\n' >&2
+  exit 64
+fi
+
+printf '%s\n' "${webhook}" > "${DEST}"
+chmod 600 "${DEST}"
+unset webhook
+
+printf 'Webhook saved securely at %s\n' "${DEST}"
+printf 'Send a test with: clamav-hook notify-test\n'

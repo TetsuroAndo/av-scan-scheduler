@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.github.tetsuroando.clamav-hook</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Library/Application Support/ClamAV-Hook/libexec/clamav-hook</string>
+    <string>scheduled</string>
+  </array>
+
+  <key>UserName</key>
+  <string>__TARGET_USER__</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>__TARGET_HOME__</string>
+    <key>CLAMAV_HOOK_HOME</key>
+    <string>__TARGET_HOME__</string>
+    <key>CLAMAV_HOOK_UID</key>
+    <string>__TARGET_UID__</string>
+    <key>CLAMAV_HOOK_CLI_LINK</key>
+    <string>__CLI_LINK__</string>
+  </dict>
+
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>3</integer>
+    <key>Minute</key>
+    <integer>17</integer>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>LowPriorityIO</key>
+  <true/>
+  <key>Nice</key>
+  <integer>15</integer>
+  <key>Umask</key>
+  <integer>63</integer>
+
+  <key>StandardOutPath</key>
+  <string>/dev/null</string>
+  <key>StandardErrorPath</key>
+  <string>/dev/null</string>
+</dict>
+</plist>
