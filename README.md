@@ -94,14 +94,15 @@ AV Scan Scheduler currently supports one configured user per Mac.
 
 ### Upgrade from the initial preview
 
-Running the `v0.1.0-alpha.2` installer over `v0.1.0-alpha.1` stops the legacy
-job, migrates its user-owned configuration, signatures, webhook, state, and
-logs, rewrites the private database path, and registers the new launchd label.
-The legacy managed command and program files are removed only after the new job
-has started successfully. Ordinary installation errors and handled signals
-restore the previous data paths and job. The legacy label is disabled before
-any data move, and rerunning the installer resumes a new-only partial migration
-after an uncatchable interruption such as power loss or `SIGKILL`.
+Running the current AV Scan Scheduler installer over the original ClamAV-Hook
+preview stops the legacy job, migrates its user-owned configuration, signatures,
+webhook, state, and logs, rewrites the private database path, and registers the
+new launchd label. The legacy managed command and program files are removed only
+after the new job has started successfully. Ordinary installation errors and
+handled signals restore the previous data paths and job. The legacy label is
+disabled before any data move, and rerunning the installer resumes a new-only
+partial migration after an uncatchable interruption such as power loss or
+`SIGKILL`.
 
 ## Configure Discord
 
