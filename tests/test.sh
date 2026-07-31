@@ -176,6 +176,28 @@ if grep -q 'AV_SCAN_SCHEDULER_ALLOW_ROOT' "${RUNNER}"; then
   fail "runner still contains an environment bypass for root refusal"
 fi
 
+SCHEDULE_PLIST="${REPO_ROOT}/launchd/io.github.tetsuroando.av-scan-scheduler.plist"
+schedule_index=0
+for schedule_hour in 0 6 12 18; do
+  actual_hour="$(
+    plutil -extract "StartCalendarInterval.${schedule_index}.Hour" raw -o - \
+      "${SCHEDULE_PLIST}"
+  )"
+  actual_minute="$(
+    plutil -extract "StartCalendarInterval.${schedule_index}.Minute" raw -o - \
+      "${SCHEDULE_PLIST}"
+  )"
+  [ "${actual_hour}" = "${schedule_hour}" ] ||
+    fail "calendar trigger ${schedule_index} has hour ${actual_hour}, expected ${schedule_hour}"
+  [ "${actual_minute}" = "17" ] ||
+    fail "calendar trigger ${schedule_index} has minute ${actual_minute}, expected 17"
+  schedule_index=$((schedule_index + 1))
+done
+if plutil -extract "StartCalendarInterval.${schedule_index}.Hour" raw -o - \
+  "${SCHEDULE_PLIST}" >/dev/null 2>&1; then
+  fail "calendar trigger list contains an unexpected fifth entry"
+fi
+
 run_hook scheduled
 [ ! -f "${STATE_DIR}/update.last-success" ] || fail "fresh install should not be immediately due"
 
