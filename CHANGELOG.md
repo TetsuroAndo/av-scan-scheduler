@@ -7,6 +7,8 @@ All notable changes to AV Scan Scheduler will be documented in this file.
 - renamed the project, CLI, launchd label, and local paths to AV Scan Scheduler;
 - added a rollback-capable, restartable migration from the initial preview
   installation;
+- changed the lightweight due-work check from once daily to every six hours so
+  sleeping MacBooks catch up promptly after wake;
 - clarified that ClamAV® is a separately installed engine and a Cisco
   trademark;
 - retained the non-root runtime, private database, schedule, and Discord

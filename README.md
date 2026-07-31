@@ -145,8 +145,9 @@ Do not run these commands with `sudo`. The runtime refuses root execution.
 
 ## Schedule
 
-The LaunchDaemon runs once at load and receives a calendar trigger every day at
-03:17 local time. It performs only work whose success interval has elapsed:
+The LaunchDaemon runs once at load and receives lightweight calendar triggers
+every six hours at 00:17, 06:17, 12:17, and 18:17 local time. Each trigger
+performs only work whose success interval has elapsed:
 
 | Task | Default interval | Default scope |
 | --- | ---: | --- |
@@ -154,10 +155,12 @@ The LaunchDaemon runs once at load and receives a calendar trigger every day at
 | Quick scan | 3 days | `~/Downloads` |
 | Full scan | 21 days | Home directory and `/Applications` |
 
-If the Mac is asleep, macOS coalesces a missed calendar event and launches the
-job after wake. Scans use `nice 15`, background process classification, and
-low-priority I/O. They can still consume CPU and generate heat while parsing
-large archives.
+If the Mac is asleep, macOS coalesces missed calendar events and launches the
+job once after wake. `RunAtLoad` also checks overdue work after the job is
+loaded, including after a restart. The six-hour checks limit normal scheduling
+delay to less than six hours without running a persistent daemon. Scans use
+`nice 15`, background process classification, and low-priority I/O. They can
+still consume CPU and generate heat while parsing large archives.
 
 A completed full scan also satisfies the quick-scan interval. Interrupted,
 incomplete, or failed scans never update success state.
