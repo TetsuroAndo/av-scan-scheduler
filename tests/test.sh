@@ -2,7 +2,7 @@
 set -eu
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-RUNNER="${REPO_ROOT}/bin/clamav-hook-runner"
+RUNNER="${REPO_ROOT}/bin/av-scan-scheduler-runner"
 TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf "${TEST_ROOT}"' EXIT INT TERM
 
@@ -65,11 +65,14 @@ EOF
 cat > "${FAKE_BIN}/jq" <<'EOF'
 #!/bin/bash
 content=""
+username=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --arg)
       if [ "${2:-}" = "content" ]; then
         content="${3:-}"
+      elif [ "${2:-}" = "username" ]; then
+        username="${3:-}"
       fi
       shift 3
       ;;
@@ -79,7 +82,8 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 printf '%s\n' "${content}" > "${FAKE_JQ_CONTENT_MARKER}"
-printf '{"content":"test","allowed_mentions":{"parse":[]}}\n'
+printf '%s\n' "${username}" > "${FAKE_JQ_USERNAME_MARKER}"
+printf '{"content":"test","username":"AV Scan Scheduler","allowed_mentions":{"parse":[]}}\n'
 exit "${FAKE_JQ_RC:-0}"
 EOF
 
@@ -131,24 +135,25 @@ chmod +x \
 
 run_hook() {
   env \
-    CLAMAV_HOOK_BASE="${BASE}" \
-    CLAMAV_HOOK_STATE_DIR="${STATE_DIR}" \
-    CLAMAV_HOOK_LOG_DIR="${LOG_DIR}" \
-    CLAMAV_HOOK_DB_DIR="${TEST_ROOT}/db" \
-    CLAMAV_HOOK_FRESHCLAM="${FAKE_BIN}/freshclam" \
-    CLAMAV_HOOK_CLAMSCAN="${FAKE_BIN}/clamscan" \
-    CLAMAV_HOOK_JQ="${FAKE_BIN}/jq" \
-    CLAMAV_HOOK_CURL="${FAKE_BIN}/curl" \
-    CLAMAV_HOOK_NICE="${FAKE_BIN}/nice" \
-    CLAMAV_HOOK_TASKPOLICY="${TEST_ROOT}/taskpolicy-not-present" \
-    CLAMAV_HOOK_PS="${FAKE_BIN}/ps" \
+    AV_SCAN_SCHEDULER_BASE="${BASE}" \
+    AV_SCAN_SCHEDULER_STATE_DIR="${STATE_DIR}" \
+    AV_SCAN_SCHEDULER_LOG_DIR="${LOG_DIR}" \
+    AV_SCAN_SCHEDULER_DB_DIR="${TEST_ROOT}/db" \
+    AV_SCAN_SCHEDULER_FRESHCLAM="${FAKE_BIN}/freshclam" \
+    AV_SCAN_SCHEDULER_CLAMSCAN="${FAKE_BIN}/clamscan" \
+    AV_SCAN_SCHEDULER_JQ="${FAKE_BIN}/jq" \
+    AV_SCAN_SCHEDULER_CURL="${FAKE_BIN}/curl" \
+    AV_SCAN_SCHEDULER_NICE="${FAKE_BIN}/nice" \
+    AV_SCAN_SCHEDULER_TASKPOLICY="${TEST_ROOT}/taskpolicy-not-present" \
+    AV_SCAN_SCHEDULER_PS="${FAKE_BIN}/ps" \
     FAKE_CURL_MARKER="${TEST_ROOT}/curl-called" \
     FAKE_JQ_CONTENT_MARKER="${TEST_ROOT}/jq-content" \
+    FAKE_JQ_USERNAME_MARKER="${TEST_ROOT}/jq-username" \
     FAKE_FRESHCLAM_ARGS="${TEST_ROOT}/freshclam-args" \
     FAKE_CLAMSCAN_ARGS="${TEST_ROOT}/clamscan-args" \
     FAKE_PS_UID="$(id -u)" \
     FAKE_PS_START="Thu Jul 31 04:00:00 2026" \
-    FAKE_PS_COMMAND="clamav-hook-test-process" \
+    FAKE_PS_COMMAND="av-scan-scheduler-test-process" \
     "${RUNNER}" "$@"
 }
 
@@ -158,7 +163,7 @@ fail() {
 }
 
 expected_version="$(cat "${REPO_ROOT}/VERSION")"
-[ "$("${REPO_ROOT}/bin/clamav-hook" --version)" = "ClamAV-Hook ${expected_version}" ] ||
+[ "$("${REPO_ROOT}/bin/av-scan-scheduler" --version)" = "AV Scan Scheduler ${expected_version}" ] ||
   fail "CLI version does not match VERSION"
 if "${REPO_ROOT}/install.sh" --help unexpected >/dev/null 2>&1; then
   fail "installer accepted an unknown argument after --help"
@@ -167,7 +172,7 @@ if "${REPO_ROOT}/uninstall.sh" --help unexpected >/dev/null 2>&1; then
   fail "uninstaller accepted an unknown argument after --help"
 fi
 
-if grep -q 'CLAMAV_HOOK_ALLOW_ROOT' "${RUNNER}"; then
+if grep -q 'AV_SCAN_SCHEDULER_ALLOW_ROOT' "${RUNNER}"; then
   fail "runner still contains an environment bypass for root refusal"
 fi
 
@@ -203,6 +208,8 @@ run_hook status | grep -q 'ClamAV test-engine/test-db' ||
 printf 'https://discord.com/api/webhooks/123456/test_token\n' > "${BASE}/discord-webhook.url"
 run_hook notify-test
 [ -f "${TEST_ROOT}/curl-called" ] || fail "notification transport was not called"
+grep -Fxq 'AV Scan Scheduler' "${TEST_ROOT}/jq-username" ||
+  fail "notification did not override the legacy Discord webhook name"
 if grep -R 'test_token' "${STATE_DIR}" "${LOG_DIR}" >/dev/null 2>&1; then
   fail "webhook token leaked into state or logs"
 fi
@@ -239,7 +246,7 @@ grep -q 'detected malware, but scan coverage was incomplete' "${TEST_ROOT}/jq-co
 
 current_uid="$(id -u)"
 current_start="Thu Jul 31 04:00:00 2026"
-current_command="clamav-hook-test-process"
+current_command="av-scan-scheduler-test-process"
 mkdir "${STATE_DIR}/run.lock"
 printf '%s\n' "$$" > "${STATE_DIR}/run.lock/pid"
 printf '%s\n' "${current_uid}" > "${STATE_DIR}/run.lock/uid"
@@ -283,4 +290,4 @@ printf '%s\n' "$(( $(date '+%s') + 86400 ))" > "${STATE_DIR}/quick.last-success"
 run_hook status | grep -q 'Quick last success:  never' ||
   fail "future state timestamp was not rejected"
 
-printf 'All ClamAV-Hook tests passed.\n'
+printf 'All AV Scan Scheduler tests passed.\n'

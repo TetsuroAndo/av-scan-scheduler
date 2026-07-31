@@ -1,13 +1,13 @@
 #!/bin/bash
 set -eu
 
-RUNNER="/Library/Application Support/ClamAV-Hook/libexec/clamav-hook"
-WEBHOOK_HELPER="/Library/Application Support/ClamAV-Hook/libexec/clamav-hook-configure-webhook"
-VERSION="0.1.0-alpha.1"
+RUNNER="/Library/Application Support/AV Scan Scheduler/libexec/av-scan-scheduler"
+WEBHOOK_HELPER="/Library/Application Support/AV Scan Scheduler/libexec/av-scan-scheduler-configure-webhook"
+VERSION="0.1.0-alpha.2"
 
 usage() {
   cat <<'EOF'
-Usage: clamav-hook <command>
+Usage: av-scan-scheduler <command>
 
 Commands:
   status              Show database, scan, and webhook status
@@ -17,7 +17,7 @@ Commands:
   configure-webhook   Store a Discord webhook with user-only permissions
   notify-test         Send one Discord test notification
   doctor              Check dependencies, private data, and scan-path access
-  version             Show the installed ClamAV-Hook version
+  version             Show the installed AV Scan Scheduler version
   help                Show this help
 EOF
 }
@@ -30,7 +30,7 @@ case "${1:-help}" in
     exec "${RUNNER}" "$1"
     ;;
   version|--version)
-    printf 'ClamAV-Hook %s\n' "${VERSION}"
+    printf 'AV Scan Scheduler %s\n' "${VERSION}"
     ;;
   help|-h|--help)
     usage

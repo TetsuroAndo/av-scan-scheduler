@@ -2,7 +2,7 @@
 set -eu
 umask 077
 
-BASE="${CLAMAV_HOOK_BASE:-${HOME}/Library/Application Support/ClamAV-Hook}"
+BASE="${AV_SCAN_SCHEDULER_BASE:-${HOME}/Library/Application Support/AV Scan Scheduler}"
 DEST="${BASE}/discord-webhook.url"
 
 if [ "$(id -u)" -eq 0 ]; then
@@ -29,4 +29,4 @@ chmod 600 "${DEST}"
 unset webhook
 
 printf 'Webhook saved securely at %s\n' "${DEST}"
-printf 'Send a test with: clamav-hook notify-test\n'
+printf 'Send a test with: av-scan-scheduler notify-test\n'

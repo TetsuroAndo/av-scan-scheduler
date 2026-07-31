@@ -4,11 +4,11 @@ umask 077
 
 PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin
 
-USER_HOME="${CLAMAV_HOOK_HOME:-${HOME:-}}"
-BASE="${CLAMAV_HOOK_BASE:-${USER_HOME}/Library/Application Support/ClamAV-Hook}"
-STATE_DIR="${CLAMAV_HOOK_STATE_DIR:-${BASE}/state}"
-LOG_DIR="${CLAMAV_HOOK_LOG_DIR:-${USER_HOME}/Library/Logs/ClamAV-Hook}"
-DB_DIR="${CLAMAV_HOOK_DB_DIR:-${BASE}/db}"
+USER_HOME="${AV_SCAN_SCHEDULER_HOME:-${HOME:-}}"
+BASE="${AV_SCAN_SCHEDULER_BASE:-${USER_HOME}/Library/Application Support/AV Scan Scheduler}"
+STATE_DIR="${AV_SCAN_SCHEDULER_STATE_DIR:-${BASE}/state}"
+LOG_DIR="${AV_SCAN_SCHEDULER_LOG_DIR:-${USER_HOME}/Library/Logs/AV Scan Scheduler}"
+DB_DIR="${AV_SCAN_SCHEDULER_DB_DIR:-${BASE}/db}"
 WEBHOOK_FILE="${BASE}/discord-webhook.url"
 SETTINGS_FILE="${BASE}/settings.conf"
 QUICK_PATHS_FILE="${BASE}/quick-paths"
@@ -17,13 +17,13 @@ FULL_EXCLUDES_FILE="${BASE}/full-excludes"
 FRESHCLAM_CONFIG="${BASE}/freshclam.conf"
 LOCK_DIR="${STATE_DIR}/run.lock"
 
-FRESHCLAM="${CLAMAV_HOOK_FRESHCLAM:-$(command -v freshclam 2>/dev/null || true)}"
-CLAMSCAN="${CLAMAV_HOOK_CLAMSCAN:-$(command -v clamscan 2>/dev/null || true)}"
-JQ="${CLAMAV_HOOK_JQ:-$(command -v jq 2>/dev/null || true)}"
-CURL="${CLAMAV_HOOK_CURL:-/usr/bin/curl}"
-NICE="${CLAMAV_HOOK_NICE:-/usr/bin/nice}"
-TASKPOLICY="${CLAMAV_HOOK_TASKPOLICY:-/usr/sbin/taskpolicy}"
-PS="${CLAMAV_HOOK_PS:-/bin/ps}"
+FRESHCLAM="${AV_SCAN_SCHEDULER_FRESHCLAM:-$(command -v freshclam 2>/dev/null || true)}"
+CLAMSCAN="${AV_SCAN_SCHEDULER_CLAMSCAN:-$(command -v clamscan 2>/dev/null || true)}"
+JQ="${AV_SCAN_SCHEDULER_JQ:-$(command -v jq 2>/dev/null || true)}"
+CURL="${AV_SCAN_SCHEDULER_CURL:-/usr/bin/curl}"
+NICE="${AV_SCAN_SCHEDULER_NICE:-/usr/bin/nice}"
+TASKPOLICY="${AV_SCAN_SCHEDULER_TASKPOLICY:-/usr/sbin/taskpolicy}"
+PS="${AV_SCAN_SCHEDULER_PS:-/bin/ps}"
 
 DEFAULT_UPDATE_INTERVAL=86400
 DEFAULT_QUICK_INTERVAL=259200
@@ -42,7 +42,7 @@ epoch_now() {
 
 refuse_root() {
   if [ "$(id -u)" -eq 0 ]; then
-    printf 'ClamAV-Hook refuses to run scans or Homebrew tools as root.\n' >&2
+    printf 'AV Scan Scheduler refuses to run scans or Homebrew tools as root.\n' >&2
     exit 77
   fi
 }
@@ -51,14 +51,14 @@ validate_home() {
   case "${USER_HOME}" in
     /Users/*) ;;
     *)
-      printf 'ClamAV-Hook requires an absolute home directory under /Users.\n' >&2
+      printf 'AV Scan Scheduler requires an absolute home directory under /Users.\n' >&2
       exit 67
       ;;
   esac
 }
 
 validate_identity() {
-  local expected="${CLAMAV_HOOK_UID:-}"
+  local expected="${AV_SCAN_SCHEDULER_UID:-}"
   if [ -z "${expected}" ]; then
     return
   fi
@@ -69,7 +69,7 @@ validate_identity() {
       ;;
   esac
   if [ "$(id -u)" -ne "${expected}" ]; then
-    printf 'ClamAV-Hook is configured for UID %s, not UID %s.\n' \
+    printf 'AV Scan Scheduler is configured for UID %s, not UID %s.\n' \
       "${expected}" "$(id -u)" >&2
     exit 77
   fi
@@ -84,7 +84,7 @@ require_tools() {
     fi
   done
   if [ "${missing}" -ne 0 ]; then
-    printf 'Required tools are missing. Install ClamAV and jq, then reinstall ClamAV-Hook.\n' >&2
+    printf 'Required tools are missing. Install ClamAV and jq, then reinstall AV Scan Scheduler.\n' >&2
     exit 69
   fi
 }
@@ -156,7 +156,7 @@ EOF
     "${FRESHCLAM_CONFIG}" \
     "${WEBHOOK_FILE}" \
     "${STATE_DIR}/installed-at"
-  printf 'Initialized ClamAV-Hook data for %s at %s\n' "${current_user}" "${BASE}"
+  printf 'Initialized AV Scan Scheduler data for %s at %s\n' "${current_user}" "${BASE}"
 }
 
 read_interval() {
@@ -405,7 +405,9 @@ notify_discord() {
   # shellcheck disable=SC2016
   if ! "${JQ}" -n \
     --arg content "${message}" \
-    '{content: $content, allowed_mentions: {parse: []}}' > "${payload_file}"; then
+    --arg username "AV Scan Scheduler" \
+    '{content: $content, username: $username, allowed_mentions: {parse: []}}' \
+    > "${payload_file}"; then
     rm -f "${payload_file}"
     payload_file_active=""
     return 1
@@ -645,7 +647,7 @@ show_status() {
   quick="$(last_success quick)"
   full="$(last_success full)"
 
-  printf 'ClamAV-Hook status\n'
+  printf 'AV Scan Scheduler status\n'
   printf '  Engine and private DB: %s\n' \
     "$("${CLAMSCAN}" --database="${DB_DIR}" --version 2>/dev/null || printf 'unavailable')"
   printf '  Private database: %s\n' "${DB_DIR}"
@@ -663,7 +665,7 @@ run_doctor() {
   local failures=0
   local paths_file line mode
 
-  printf 'ClamAV-Hook doctor\n'
+  printf 'AV Scan Scheduler doctor\n'
   printf '  Runtime user: %s (uid %s)\n' "$(id -un)" "$(id -u)"
 
   if [ -r "${FRESHCLAM_CONFIG}" ] && [ -w "${DB_DIR}" ]; then
@@ -677,7 +679,7 @@ run_doctor() {
     grep -q .; then
     printf '  Signature files: present\n'
   else
-    printf '  Signature files: missing; run clamav-hook update\n' >&2
+    printf '  Signature files: missing; run av-scan-scheduler update\n' >&2
     failures=$((failures + 1))
   fi
 
@@ -756,7 +758,7 @@ case "${command_name}" in
 esac
 
 if ! acquire_lock; then
-  printf '%s Another ClamAV-Hook task is already running.\n' "$(timestamp)" >&2
+  printf '%s Another AV Scan Scheduler task is already running.\n' "$(timestamp)" >&2
   exit 75
 fi
 trap cleanup_lock EXIT
@@ -781,7 +783,7 @@ case "${command_name}" in
       printf 'Discord webhook is not configured.\n' >&2
       exit 78
     fi
-    if notify_discord "✅ ClamAV-Hook notification test succeeded."; then
+    if notify_discord "✅ AV Scan Scheduler notification test succeeded."; then
       printf 'Discord notification test sent successfully.\n'
     else
       printf 'Discord notification test failed.\n' >&2

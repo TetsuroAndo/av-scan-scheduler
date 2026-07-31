@@ -4,12 +4,12 @@ umask 077
 
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 
-LABEL="io.github.tetsuroando.clamav-hook"
+LABEL="io.github.tetsuroando.av-scan-scheduler"
 SYSTEM_PARENT="/Library/Application Support"
-SYSTEM_BASE="/Library/Application Support/ClamAV-Hook"
-RUNNER="${SYSTEM_BASE}/libexec/clamav-hook"
-CLI="${SYSTEM_BASE}/bin/clamav-hook"
-WEBHOOK_HELPER="${SYSTEM_BASE}/libexec/clamav-hook-configure-webhook"
+SYSTEM_BASE="/Library/Application Support/AV Scan Scheduler"
+RUNNER="${SYSTEM_BASE}/libexec/av-scan-scheduler"
+CLI="${SYSTEM_BASE}/bin/av-scan-scheduler"
+WEBHOOK_HELPER="${SYSTEM_BASE}/libexec/av-scan-scheduler-configure-webhook"
 LAUNCHD_DIR="/Library/LaunchDaemons"
 PLIST="/Library/LaunchDaemons/${LABEL}.plist"
 PURGE=0
@@ -197,10 +197,10 @@ fi
 validate_system_paths
 
 if [ -f "${PLIST}" ]; then
-  target_home="$(plutil -extract EnvironmentVariables.CLAMAV_HOOK_HOME raw -o - "${PLIST}" 2>/dev/null || true)"
+  target_home="$(plutil -extract EnvironmentVariables.AV_SCAN_SCHEDULER_HOME raw -o - "${PLIST}" 2>/dev/null || true)"
   target_user="$(plutil -extract UserName raw -o - "${PLIST}" 2>/dev/null || true)"
-  target_uid="$(plutil -extract EnvironmentVariables.CLAMAV_HOOK_UID raw -o - "${PLIST}" 2>/dev/null || true)"
-  cli_link="$(plutil -extract EnvironmentVariables.CLAMAV_HOOK_CLI_LINK raw -o - "${PLIST}" 2>/dev/null || true)"
+  target_uid="$(plutil -extract EnvironmentVariables.AV_SCAN_SCHEDULER_UID raw -o - "${PLIST}" 2>/dev/null || true)"
+  cli_link="$(plutil -extract EnvironmentVariables.AV_SCAN_SCHEDULER_CLI_LINK raw -o - "${PLIST}" 2>/dev/null || true)"
 fi
 
 if [ "${PURGE}" -eq 1 ]; then
@@ -238,8 +238,8 @@ if [ "${PURGE}" -eq 1 ]; then
     die "Purge refused for non-canonical or symbolic-link home: ${target_home}" 70
   fi
 
-  data_dir="${target_home}/Library/Application Support/ClamAV-Hook"
-  log_dir="${target_home}/Library/Logs/ClamAV-Hook"
+  data_dir="${target_home}/Library/Application Support/AV Scan Scheduler"
+  log_dir="${target_home}/Library/Logs/AV Scan Scheduler"
   for purge_path in \
     "${target_home}" \
     "${target_home}/Library" \
@@ -295,9 +295,9 @@ if [ "${PURGE}" -eq 1 ]; then
   done
   sudo -u "${target_user}" env HOME="${target_home}" \
     rm -rf "${data_dir}" "${log_dir}"
-  printf 'ClamAV-Hook and its local data were removed.\n'
+  printf 'AV Scan Scheduler and its local data were removed.\n'
 else
-  printf 'ClamAV-Hook was removed. User configuration, signatures, and logs were preserved.\n'
+  printf 'AV Scan Scheduler was removed. User configuration, signatures, and logs were preserved.\n'
   printf 'Run ./uninstall.sh --purge to remove preserved local data.\n'
 fi
 
