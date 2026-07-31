@@ -3,11 +3,11 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>io.github.tetsuroando.clamav-hook</string>
+  <string>io.github.tetsuroando.av-scan-scheduler</string>
 
   <key>ProgramArguments</key>
   <array>
-    <string>/Library/Application Support/ClamAV-Hook/libexec/clamav-hook</string>
+    <string>/Library/Application Support/AV Scan Scheduler/libexec/av-scan-scheduler</string>
     <string>scheduled</string>
   </array>
 
@@ -18,11 +18,11 @@
   <dict>
     <key>HOME</key>
     <string>__TARGET_HOME__</string>
-    <key>CLAMAV_HOOK_HOME</key>
+    <key>AV_SCAN_SCHEDULER_HOME</key>
     <string>__TARGET_HOME__</string>
-    <key>CLAMAV_HOOK_UID</key>
+    <key>AV_SCAN_SCHEDULER_UID</key>
     <string>__TARGET_UID__</string>
-    <key>CLAMAV_HOOK_CLI_LINK</key>
+    <key>AV_SCAN_SCHEDULER_CLI_LINK</key>
     <string>__CLI_LINK__</string>
   </dict>
 
