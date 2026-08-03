@@ -45,7 +45,12 @@ printf '%s\n' "$@" > "${FAKE_CLAMSCAN_ARGS}"
 if [ "${FAKE_CLAMSCAN_ACCESS_ERROR:-0}" = "1" ]; then
   printf 'ERROR: Operation not permitted\n'
 fi
-if [ "${FAKE_CLAMSCAN_RC:-0}" = "1" ]; then
+if [ -n "${FAKE_CLAMSCAN_FOUND_LINES:-}" ]; then
+  printf '%s\n' "${FAKE_CLAMSCAN_FOUND_LINES}"
+fi
+if [ -n "${FAKE_CLAMSCAN_INFECTED:-}" ]; then
+  infected_files="${FAKE_CLAMSCAN_INFECTED}"
+elif [ "${FAKE_CLAMSCAN_RC:-0}" = "1" ]; then
   infected_files=1
 else
   infected_files=0
@@ -265,6 +270,42 @@ fi
   fail "detected scan with incomplete coverage was recorded as success"
 grep -q 'detected malware, but scan coverage was incomplete' "${TEST_ROOT}/jq-content" ||
   fail "incomplete detected scan notification lost the detection warning"
+
+# A scan whose only alerts are scan-limit heuristics is not a detection.
+rm -f "${STATE_DIR}/quick.last-success"
+if FAKE_CLAMSCAN_RC=1 \
+  FAKE_CLAMSCAN_INFECTED=1 \
+  FAKE_CLAMSCAN_FOUND_LINES="${QUICK_DIR}/big.zip: Heuristics.Limits.Exceeded.MaxScanTime FOUND" \
+  run_hook quick; then
+  fail "scan-limit alerts should keep the clamscan exit status"
+else
+  rc=$?
+  [ "${rc}" -eq 1 ] || fail "scan-limit-only scan returned ${rc}, expected 1"
+fi
+grep -q 'NOT a malware detection' "${TEST_ROOT}/jq-content" ||
+  fail "scan-limit-only scan was not reported as a limits warning"
+if grep -q 'detected malware' "${TEST_ROOT}/jq-content"; then
+  fail "scan-limit-only scan was reported as malware"
+fi
+grep -q 'Infected files: 0 (1 scan-limit alert' "${TEST_ROOT}/jq-content" ||
+  fail "scan-limit-only summary still presented limit hits as infections"
+grep -q 'big.zip' "${TEST_ROOT}/jq-content" ||
+  fail "scan-limit-only notification did not name the affected files"
+
+# A real signature alongside scan-limit alerts must still raise the alarm.
+rm -f "${STATE_DIR}/quick.last-success"
+if FAKE_CLAMSCAN_RC=1 \
+  FAKE_CLAMSCAN_INFECTED=2 \
+  FAKE_CLAMSCAN_FOUND_LINES="${QUICK_DIR}/big.zip: Heuristics.Limits.Exceeded.MaxFiles FOUND
+${QUICK_DIR}/eicar.com: Eicar-Signature FOUND" \
+  run_hook quick; then
+  fail "signature detection should return exit 1"
+else
+  rc=$?
+  [ "${rc}" -eq 1 ] || fail "signature detection returned ${rc}, expected 1"
+fi
+grep -q 'detected malware' "${TEST_ROOT}/jq-content" ||
+  fail "signature alongside scan-limit alerts lost the malware warning"
 
 current_uid="$(id -u)"
 current_start="Thu Jul 31 04:00:00 2026"
