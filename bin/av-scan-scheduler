@@ -3,7 +3,7 @@ set -eu
 
 RUNNER="/Library/Application Support/AV Scan Scheduler/libexec/av-scan-scheduler"
 WEBHOOK_HELPER="/Library/Application Support/AV Scan Scheduler/libexec/av-scan-scheduler-configure-webhook"
-VERSION="0.1.0-alpha.1"
+VERSION="0.1.0-alpha.2"
 
 usage() {
   cat <<'EOF'

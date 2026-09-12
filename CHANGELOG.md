@@ -2,7 +2,7 @@
 
 All notable changes to AV Scan Scheduler will be documented in this file.
 
-## Unreleased
+## 0.1.0-alpha.2 - 2026-09-12
 
 Fixed:
 
