@@ -444,6 +444,78 @@ summary_from_log() {
   fi
 }
 
+# Alert names with this prefix only mean "this file was too large or took too
+# long to finish scanning". They are not signature matches.
+LIMIT_ALERT_PREFIX='Heuristics.Limits.Exceeded'
+
+# Classify a finished scan from its FOUND lines, not from the exit code:
+# clamscan also exits 1 when it raised nothing but scan-limit heuristics.
+# Prints one of: malware, limits, clean.
+classify_findings() {
+  local log_file="$1"
+  awk -v prefix="${LIMIT_ALERT_PREFIX}" '
+    NF >= 2 && $NF == "FOUND" {
+      if (index($(NF - 1), prefix) == 1) {
+        limits++
+      } else {
+        malware++
+      }
+    }
+    END {
+      if (malware > 0) {
+        print "malware"
+      } else if (limits > 0) {
+        print "limits"
+      } else {
+        print "clean"
+      }
+    }
+  ' "${log_file}"
+}
+
+count_limit_alerts() {
+  local log_file="$1"
+  awk -v prefix="${LIMIT_ALERT_PREFIX}" '
+    NF >= 2 && $NF == "FOUND" && index($(NF - 1), prefix) == 1 { total++ }
+    END { print total + 0 }
+  ' "${log_file}"
+}
+
+list_limit_alerts() {
+  local log_file="$1"
+  awk -v prefix="${LIMIT_ALERT_PREFIX}" '
+    NF >= 2 && $NF == "FOUND" && index($(NF - 1), prefix) == 1 {
+      path = $0
+      sub(/: [^ ]+ FOUND$/, "", path)
+      depth = split(path, parts, "/")
+      if (++shown <= 10) {
+        printf "  %s\n", parts[depth]
+      }
+      total++
+    }
+    END {
+      if (total > 10) {
+        printf "  ... and %d more\n", total - 10
+      }
+    }
+  ' "${log_file}"
+}
+
+# clamscan counts scan-limit heuristics under "Infected files". Restate that
+# line so a limits-only scan is never presented as an infection count.
+restate_limit_summary() {
+  local summary="$1"
+  local limits="$2"
+  printf '%s\n' "${summary}" |
+    awk -v limits="${limits}" '
+      /^Infected files:[[:space:]]*[0-9]+[[:space:]]*$/ {
+        printf "Infected files: 0 (%s scan-limit alert(s), not infections)\n", limits
+        next
+      }
+      { print }
+    '
+}
+
 run_update() {
   local log_file rc
   log_file="${LOG_DIR}/freshclam-$(date '+%Y%m%d-%H%M%S')-$$.log"
@@ -479,6 +551,7 @@ run_scan() {
   local mode="$1"
   local paths_file log_file line rc summary target_count
   local total_errors access_errors coverage_errors detected coverage_incomplete
+  local findings limits_count limits_list coverage_rewritten
   local -a scan_args
 
   if [ "${mode}" = "quick" ]; then
@@ -558,7 +631,12 @@ run_scan() {
   child_pid=""
   detected=0
   coverage_incomplete=0
-  if [ "${rc}" -eq 1 ]; then
+  coverage_rewritten=0
+  # Trust the log, not the exit code: clamscan also exits 1 when every alert is
+  # a scan-limit heuristic. Anything we cannot positively identify as
+  # limits-only is still treated as a detection.
+  findings="$(classify_findings "${log_file}")"
+  if [ "${rc}" -eq 1 ] && [ "${findings}" != "limits" ]; then
     detected=1
   fi
   total_errors="$(
@@ -589,6 +667,7 @@ run_scan() {
   if [ "${coverage_incomplete}" -eq 1 ] &&
      { [ "${rc}" -eq 0 ] || [ "${rc}" -eq 1 ]; }; then
     rc=2
+    coverage_rewritten=1
     printf '%s Scan coverage was incomplete (%s scan error(s))\n' \
       "$(timestamp)" "${coverage_errors}" | tee -a "${log_file}" >&2
   fi
@@ -621,11 +700,54 @@ ${summary}
       if [ "${mode}" = "full" ]; then
         mark_success quick
       fi
-      notify_discord "🚨 ClamAV ${mode} scan detected malware.
+      if [ "${findings}" = "limits" ]; then
+        limits_count="$(count_limit_alerts "${log_file}")"
+        limits_list="$(list_limit_alerts "${log_file}")"
+        summary="$(restate_limit_summary "${summary}" "${limits_count}")"
+        notify_discord "⚠️ ClamAV ${mode} scan finished, but ${limits_count} large file(s) could not be scanned to completion because they hit the size/time limits. This is NOT a malware detection.
+\`\`\`
+Not fully scanned:
+${limits_list}
+${summary}
+\`\`\`
+Review the private local log: ${log_file}" || true
+      else
+        notify_discord "🚨 ClamAV ${mode} scan detected malware.
 \`\`\`
 ${summary}
 \`\`\`
 Review the private local log: ${log_file}" || true
+      fi
+      ;;
+    2)
+      # Coverage was incomplete only because some items could not be read
+      # (permission-protected paths, files in use). The scan still ran to
+      # completion over everything it could open and found no malware, so it
+      # must record success. Without this the last-success timestamp never
+      # advances, last_reference() keeps falling back to installed-at, and the
+      # scheduler starts a fresh full scan on every tick forever - which also
+      # starves the quick scan, because full is checked first.
+      if [ "${coverage_rewritten}" -eq 1 ]; then
+        mark_success "${mode}"
+        if [ "${mode}" = "full" ]; then
+          mark_success quick
+        fi
+        if [ "${findings}" = "limits" ]; then
+          limits_count="$(count_limit_alerts "${log_file}")"
+          summary="$(restate_limit_summary "${summary}" "${limits_count}")"
+        fi
+        notify_discord "⚠️ ClamAV ${mode} scan completed with no malware detected, but ${coverage_errors} item(s) could not be read, so coverage was incomplete.
+\`\`\`
+${summary}
+\`\`\`
+Review the private local log: ${log_file}" || true
+      else
+        notify_discord "⚠️ ClamAV ${mode} scan failed (exit ${rc}).
+\`\`\`
+${summary}
+\`\`\`
+Review the private local log: ${log_file}" || true
+      fi
       ;;
     *)
       notify_discord "⚠️ ClamAV ${mode} scan failed (exit ${rc}).
