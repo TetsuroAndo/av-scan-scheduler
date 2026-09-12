@@ -248,6 +248,10 @@ else
   [ "${rc}" -eq 69 ] || fail "failed Discord transport returned ${rc}, expected 69"
 fi
 
+# Unreadable items make coverage incomplete, and that is reported through the
+# exit status. But a scan that detected no malware must still record success:
+# otherwise last-success never advances and the scheduler restarts a full scan
+# on every tick forever.
 rm -f "${STATE_DIR}/quick.last-success"
 if FAKE_CLAMSCAN_ACCESS_ERROR=1 run_hook quick; then
   fail "incomplete scan coverage should not report clean"
@@ -255,7 +259,10 @@ else
   rc=$?
   [ "${rc}" -eq 2 ] || fail "coverage error returned ${rc}, expected 2"
 fi
-[ ! -f "${STATE_DIR}/quick.last-success" ] || fail "coverage failure was recorded as success"
+[ -s "${STATE_DIR}/quick.last-success" ] ||
+  fail "clean scan with incomplete coverage was not recorded as success"
+grep -q 'coverage was incomplete' "${TEST_ROOT}/jq-content" ||
+  fail "incomplete coverage notification lost the coverage warning"
 unset FAKE_CLAMSCAN_ACCESS_ERROR
 
 rm -f "${STATE_DIR}/full.last-success"
@@ -306,6 +313,28 @@ else
 fi
 grep -q 'detected malware' "${TEST_ROOT}/jq-content" ||
   fail "signature alongside scan-limit alerts lost the malware warning"
+
+# Scan-limit alerts combined with unreadable items must still advance
+# last-success, so the configured full-scan interval actually starts counting.
+rm -f "${STATE_DIR}/full.last-success" "${STATE_DIR}/quick.last-success"
+if FAKE_CLAMSCAN_RC=1 \
+  FAKE_CLAMSCAN_INFECTED=1 \
+  FAKE_CLAMSCAN_TOTAL_ERRORS=3 \
+  FAKE_CLAMSCAN_FOUND_LINES="${QUICK_DIR}/big.zip: Heuristics.Limits.Exceeded.MaxScanTime FOUND" \
+  run_hook full; then
+  fail "limits-only scan with incomplete coverage should report exit 2"
+else
+  rc=$?
+  [ "${rc}" -eq 2 ] ||
+    fail "limits-only scan with incomplete coverage returned ${rc}, expected 2"
+fi
+[ -s "${STATE_DIR}/full.last-success" ] ||
+  fail "limits-only scan with incomplete coverage was not recorded as success"
+[ -s "${STATE_DIR}/quick.last-success" ] ||
+  fail "full scan with incomplete coverage did not also satisfy quick scan"
+if grep -q 'detected malware' "${TEST_ROOT}/jq-content"; then
+  fail "limits-only scan with incomplete coverage was reported as malware"
+fi
 
 current_uid="$(id -u)"
 current_start="Thu Jul 31 04:00:00 2026"
